@@ -1,3 +1,4 @@
+# fmt: off
 import argparse
 import os
 import warnings
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
 
 def transcribe(
     model: "Whisper",
-    audio: Union[str, np.ndarray, torch.Tensor],
+    log_mel_spectrogram: Union[np.ndarray, torch.Tensor],
     *,
     verbose: Optional[bool] = None,
     temperature: Union[float, Tuple[float, ...]] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
@@ -26,6 +27,8 @@ def transcribe(
     logprob_threshold: Optional[float] = -1.0,
     no_speech_threshold: Optional[float] = 0.6,
     condition_on_previous_text: bool = True,
+    hook: callable = None,
+    disable_progress_bar: bool = False,
     **decode_options,
 ):
     """
@@ -36,8 +39,8 @@ def transcribe(
     model: Whisper
         The Whisper model instance
 
-    audio: Union[str, np.ndarray, torch.Tensor]
-        The path to the audio file to open, or the audio waveform
+    log_mel_spectrogram: Union[np.ndarray, torch.Tensor]
+        Log mel spectrogram of the audio input
 
     verbose: bool
         Whether to display the text being decoded to the console. If True, displays all the details,
@@ -65,6 +68,13 @@ def transcribe(
     decode_options: dict
         Keyword arguments to construct `DecodingOptions` instances
 
+    hook: callable
+        A callback function use to report progress. eg: Get transcription segments
+        as they are generated instead of waiting till the end of transcription.
+
+    disable_progress_bar: bool
+        Ensure that the progress bar is not shown (even in non verbose mode)
+
     Returns
     -------
     A dictionary containing the resulting text ("text") and segment-level details ("segments"), and
@@ -81,7 +91,7 @@ def transcribe(
     if dtype == torch.float32:
         decode_options["fp16"] = False
 
-    mel = log_mel_spectrogram(audio)
+    mel = log_mel_spectrogram
 
     if decode_options.get("language", None) is None:
         if not model.is_multilingual:
@@ -136,6 +146,7 @@ def transcribe(
     )  # time per output token: 0.02 (seconds)
     all_tokens = []
     all_segments = []
+    num_segments = [0]
     prompt_reset_since = 0
 
     initial_prompt = decode_options.pop("initial_prompt", None) or []
@@ -150,20 +161,23 @@ def transcribe(
         if len(text.strip()) == 0:  # skip empty text output
             return
 
-        all_segments.append(
-            {
-                "id": len(all_segments),
-                "seek": seek,
-                "start": start,
-                "end": end,
-                "text": text,
-                "tokens": text_tokens.tolist(),
-                "temperature": result.temperature,
-                "avg_logprob": result.avg_logprob,
-                "compression_ratio": result.compression_ratio,
-                "no_speech_prob": result.no_speech_prob,
-            }
-        )
+        segment = {
+            "id": num_segments[0],
+            "seek": seek,
+            "start": start,
+            "end": end,
+            "text": text,
+            "tokens": text_tokens.tolist(),
+            "temperature": result.temperature,
+            "avg_logprob": result.avg_logprob,
+            "compression_ratio": result.compression_ratio,
+            "no_speech_prob": result.no_speech_prob,
+        }
+        num_segments[0] += 1
+        if hook:
+            hook("segment", segment)
+        else:
+            all_segments.append(segment)
         if verbose:
             print(f"[{format_timestamp(start)} --> {format_timestamp(end)}] {text}")
 
@@ -171,7 +185,7 @@ def transcribe(
     num_frames = mel.shape[-1]
     previous_seek_value = seek
 
-    with tqdm.tqdm(total=num_frames, unit='frames', disable=verbose is not False) as pbar:
+    with tqdm.tqdm(total=num_frames, unit='frames', disable=verbose is not False or disable_progress_bar) as pbar:
         while seek < num_frames:
             timestamp_offset = float(seek * HOP_LENGTH / SAMPLE_RATE)
             segment = pad_or_trim(mel[:, seek:], N_FRAMES).to(model.device).to(dtype)
@@ -304,7 +318,8 @@ def cli():
     model = load_model(model_name, device=device, download_root=model_dir)
 
     for audio_path in args.pop("audio"):
-        result = transcribe(model, audio_path, temperature=temperature, **args)
+        mel = log_mel_spectrogram(audio_path)
+        result = transcribe(model, mel, temperature=temperature, **args)
 
         audio_basename = os.path.basename(audio_path)
 
@@ -323,3 +338,4 @@ def cli():
 
 if __name__ == '__main__':
     cli()
+# fmt: on
