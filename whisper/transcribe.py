@@ -254,7 +254,11 @@ def transcribe(
                 prompt_reset_since = len(all_tokens)
 
             # update progress bar
-            pbar.update(min(num_frames, seek) - previous_seek_value)
+            nprogress = min(num_frames, seek) - previous_seek_value
+            pbar.update(nprogress)
+            if hook is not None:
+                hook("progress", nprogress=nprogress, seek=seek,
+                        previous_seek_value=previous_seek_value)
             previous_seek_value = seek
 
     return dict(text=tokenizer.decode(all_tokens[len(initial_prompt):]), segments=all_segments, language=language)
